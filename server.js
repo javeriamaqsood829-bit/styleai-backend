@@ -55,8 +55,12 @@ function requireAdmin(req, res, next) {
 }
 
 // ---- email ----
+// Railway (and most cloud hosts) block outbound SMTP ports (465/587) to
+// prevent spam, so a traditional nodemailer/SMTP connection will time out.
+// If RESEND_API_KEY is set, we send email over plain HTTPS via Resend's API
+// instead — that always works since it's just a normal web request.
 let transporter = null;
-if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+if (!process.env.RESEND_API_KEY && process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
   transporter = nodemailer.createTransport({
     host: process.env.SMTP_HOST,
     port: Number(process.env.SMTP_PORT || 465),
@@ -65,9 +69,36 @@ if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
   });
 }
 async function sendMail(to, subject, html) {
+  const fromName = process.env.STORE_NAME || "StyleAI Studio";
+
+  if (process.env.RESEND_API_KEY) {
+    try {
+      const resp = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${process.env.RESEND_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          from: process.env.RESEND_FROM || `${fromName} <onboarding@resend.dev>`,
+          to,
+          subject,
+          html,
+        }),
+      });
+      if (!resp.ok) {
+        const errText = await resp.text();
+        console.error("Resend email failed:", resp.status, errText);
+      }
+    } catch (err) {
+      console.error("Resend email failed:", err.message);
+    }
+    return;
+  }
+
   if (!transporter) return; // email not configured — order creation still succeeds
   try {
-    await transporter.sendMail({ from: `"${process.env.STORE_NAME || "StyleAI Studio"}" <${process.env.SMTP_USER}>`, to, subject, html });
+    await transporter.sendMail({ from: `"${fromName}" <${process.env.SMTP_USER}>`, to, subject, html });
   } catch (err) {
     console.error("Email send failed:", err.message);
   }
