@@ -131,6 +131,16 @@ app.get("/api/orders/:id", (req, res) => {
   res.json(order);
 });
 
+// ---- customer: look up all their orders by phone number alone (no order ID needed) ----
+app.get("/api/orders/by-phone/:phone", (req, res) => {
+  const phone = req.params.phone.trim();
+  if (!phone) return res.status(400).json({ error: "Phone number is required." });
+  const matches = db.data.orders
+    .filter(o => o.phone === phone)
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  res.json({ orders: matches });
+});
+
 // ---- admin: list all orders ----
 app.get("/api/admin/orders", requireAdmin, (req, res) => {
   const orders = [...db.data.orders].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
