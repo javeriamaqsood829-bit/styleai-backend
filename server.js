@@ -112,9 +112,8 @@ app.get("/api/health", (req, res) => res.json({ ok: true }));
 // ---- create order ----
 app.post("/api/orders", async (req, res) => {
   try {
-    const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
-    if (rateLimited(ip)) return res.status(429).json({ error: "Too many requests, please wait a moment." });
-
+    // Note: no rate limit here — customers can place as many orders as they
+    // like from the same IP, email, or phone number.
     const { name, phone, email, address, city, notes, items, paymentMethod } = req.body;
     if (!name || !phone || !address || !city) {
       return res.status(400).json({ error: "Name, phone, address and city are required." });
