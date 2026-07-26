@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>StyleAI Studio — Orders Admin</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+<style>
+  :root{ --purple:#7C5CFC; --ink:#2E2620; --muted:#8A8078; --line:#e7e2d8; --ivory:#FAF9F6; }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:var(--ivory);color:var(--ink);}
+  header{background:#fff;border-bottom:1px solid var(--line);padding:18px 28px;display:flex;justify-content:space-between;align-items:center;}
+  header h1{font-size:17px;margin:0;}
+  header .sub{font-size:12px;color:var(--muted);}
+  .wrap{max-width:1240px;margin:0 auto;padding:24px 28px 60px;}
+  .toolbar{display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap;align-items:center;}
+  .toolbar input, .toolbar select{padding:9px 12px;border:1px solid var(--line);border-radius:10px;font-size:13px;font-family:inherit;}
+  .toolbar input[type="text"]{flex:1;min-width:200px;}
+  .stat-row{display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap;}
+  .stat{background:#fff;border:1px solid var(--line);border-radius:14px;padding:14px 18px;min-width:120px;}
+  .stat .n{font-size:22px;font-weight:700;}
+  .stat .l{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;}
+  table{width:100%;border-collapse:collapse;background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 8px 24px -16px rgba(0,0,0,.15);}
+  th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);padding:12px 14px;border-bottom:1px solid var(--line);background:#fbfaf7;}
+  td{padding:14px;border-bottom:1px solid var(--line);font-size:13px;vertical-align:top;}
+  tr:last-child td{border-bottom:none;}
+  .pill{display:inline-block;padding:4px 10px;border-radius:100px;font-size:11px;font-weight:600;}
+  .pill.pending{background:#fdf1da;color:#a5690a;}
+  .pill.confirmed{background:#e6f0fd;color:#2861c9;}
+  .pill.processing{background:#f0eaff;color:#6440e0;}
+  .pill.shipped{background:#e6f7ee;color:#2f7a45;}
+  .pill.delivered{background:#e6f7ee;color:#1f5c31;}
+  .pill.cancelled{background:#fdeaea;color:#c23b3b;}
+  select.status-select{border:1px solid var(--line);border-radius:8px;padding:6px 8px;font-size:12px;font-family:inherit;}
+  .items-list{margin:0;padding-left:16px;font-size:12px;color:var(--muted);}
+  .login-box{max-width:360px;margin:100px auto;background:#fff;border:1px solid var(--line);border-radius:16px;padding:30px;text-align:center;}
+  .login-box input{width:100%;padding:11px 14px;border:1px solid var(--line);border-radius:10px;margin:14px 0;font-size:13px;}
+  .login-box button, .toolbar button{background:var(--purple);color:#fff;border:none;padding:10px 18px;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;}
+  .hidden{display:none !important;}
+  .empty{text-align:center;padding:60px;color:var(--muted);}
+  .api-base-note{font-size:11px;color:var(--muted);margin-top:8px;}
+</style>
+</head>
+<body>
+
+<div id="loginScreen" class="login-box">
+  <h2 style="margin:0 0 6px;">Orders Admin</h2>
+  <p style="color:var(--muted);font-size:13px;margin:0;">Enter your admin token and backend URL to continue.</p>
+  <input type="text" id="apiBaseInput" placeholder="Backend URL, e.g. https://your-backend.onrender.com">
+  <input type="password" id="tokenInput" placeholder="Admin token (from your .env)">
+  <button onclick="login()">View Orders</button>
+  <p class="api-base-note">Both are saved only in this browser (localStorage) — never sent anywhere except your own backend.</p>
+</div>
+
+<div id="dashboard" class="hidden">
+  <header>
+    <div>
+      <h1>StyleAI Studio — Orders</h1>
+      <div class="sub" id="backendLabel"></div>
+    </div>
+    <button onclick="logout()" style="background:none;color:var(--muted);border:1px solid var(--line);padding:8px 14px;border-radius:10px;cursor:pointer;font-size:12px;">Log out</button>
+  </header>
+  <div class="wrap">
+    <div class="stat-row" id="statRow"></div>
+    <div class="toolbar">
+      <input type="text" id="searchBox" placeholder="Search name, phone, order ID…" oninput="renderTable()">
+      <select id="statusFilter" onchange="renderTable()">
+        <option value="">All statuses</option>
+        <option value="pending">Pending</option>
+        <option value="confirmed">Confirmed</option>
+        <option value="processing">Processing</option>
+        <option value="shipped">Shipped</option>
+        <option value="delivered">Delivered</option>
+        <option value="cancelled">Cancelled</option>
+      </select>
+      <button onclick="loadOrders()">Refresh</button>
+    </div>
+    <table id="ordersTable">
+      <thead>
+        <tr>
+          <th>Order</th><th>Customer</th><th>Items</th><th>Payment</th><th>Status</th><th>Placed</th>
+        </tr>
+      </thead>
+      <tbody id="ordersBody"></tbody>
+    </table>
+    <div id="emptyState" class="empty hidden">No orders yet.</div>
+  </div>
+</div>
+
+<script>
+let API_BASE = localStorage.getItem('sa_admin_api') || '';
+let TOKEN = localStorage.getItem('sa_admin_token') || '';
+let orders = [];
+
+function login(){
+  const base = document.getElementById('apiBaseInput').value.trim().replace(/\/$/,'');
+  const token = document.getElementById('tokenInput').value.trim();
+  if(!base || !token){ alert('Enter both the backend URL and admin token'); return; }
+  API_BASE = base; TOKEN = token;
+  localStorage.setItem('sa_admin_api', base);
+  localStorage.setItem('sa_admin_token', token);
+  showDashboard();
+}
+function logout(){
+  localStorage.removeItem('sa_admin_api'); localStorage.removeItem('sa_admin_token');
+  location.reload();
+}
+function showDashboard(){
+  document.getElementById('loginScreen').classList.add('hidden');
+  document.getElementById('dashboard').classList.remove('hidden');
+  document.getElementById('backendLabel').textContent = API_BASE;
+  loadOrders();
+}
+
+async function loadOrders(){
+  try{
+    const resp = await fetch(API_BASE + '/api/admin/orders', { headers: { 'x-admin-token': TOKEN } });
+    if(resp.status === 401){ alert('Invalid admin token'); logout(); return; }
+    const data = await resp.json();
+    orders = data.orders || [];
+    renderStats();
+    renderTable();
+  }catch(err){
+    alert('Could not reach backend at ' + API_BASE + '\\n' + err.message);
+  }
+}
+
+function renderStats(){
+  const counts = {};
+  orders.forEach(o=> counts[o.status] = (counts[o.status]||0)+1);
+  const stats = [
+    ['Total', orders.length],
+    ['Pending', counts.pending||0],
+    ['Confirmed', counts.confirmed||0],
+    ['Processing', counts.processing||0],
+    ['Shipped', counts.shipped||0],
+    ['Delivered', counts.delivered||0],
+  ];
+  document.getElementById('statRow').innerHTML = stats.map(([l,n])=>
+    `<div class="stat"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('');
+}
+
+function renderTable(){
+  const q = document.getElementById('searchBox').value.toLowerCase();
+  const statusFilter = document.getElementById('statusFilter').value;
+  let list = orders.filter(o=>
+    (!statusFilter || o.status===statusFilter) &&
+    (!q || o.name.toLowerCase().includes(q) || o.phone.includes(q) || o.id.toLowerCase().includes(q))
+  );
+  const body = document.getElementById('ordersBody');
+  document.getElementById('emptyState').classList.toggle('hidden', list.length>0);
+  body.innerHTML = list.map(o=>`
+    <tr>
+      <td><strong>#${o.id}</strong></td>
+      <td>${o.name}<br><span style="color:var(--muted);font-size:11.5px;">${o.phone}${o.email?'<br>'+o.email:''}</span><br><span style="color:var(--muted);font-size:11.5px;">${o.address}, ${o.city}</span></td>
+      <td><ul class="items-list">${o.items.map(i=>`<li>${i.qty} × ${i.name}${i.note?` (${i.note})`:''}</li>`).join('')}</ul>${o.notes?`<div style="font-size:11.5px;color:var(--muted);margin-top:6px;">Note: ${o.notes}</div>`:''}</td>
+      <td>${o.paymentMethod==='online'?'Online':'Cash on Delivery'}<br><span style="font-size:11px;color:var(--muted);">${o.paymentStatus}</span></td>
+      <td>
+        <span class="pill ${o.status}">${o.status}</span><br>
+        <select class="status-select" style="margin-top:6px;" onchange="updateStatus('${o.id}', this.value)">
+          ${['pending','confirmed','processing','shipped','delivered','cancelled'].map(s=>`<option value="${s}" ${s===o.status?'selected':''}>${s}</option>`).join('')}
+        </select>
+      </td>
+      <td style="font-size:11.5px;color:var(--muted);white-space:nowrap;">${new Date(o.createdAt).toLocaleString()}</td>
+    </tr>`).join('');
+}
+
+async function updateStatus(id, status){
+  try{
+    await fetch(API_BASE + `/api/admin/orders/${id}/status`, {
+      method:'PATCH',
+      headers:{ 'Content-Type':'application/json', 'x-admin-token': TOKEN },
+      body: JSON.stringify({ status })
+    });
+    loadOrders();
+  }catch(err){ alert('Could not update status: ' + err.message); }
+}
+
+if(API_BASE && TOKEN){
+  document.getElementById('apiBaseInput').value = API_BASE;
+  document.getElementById('tokenInput').value = TOKEN;
+  showDashboard();
+}
+</script>
+</body>
+</html>
