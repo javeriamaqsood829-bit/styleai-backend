@@ -15,12 +15,14 @@ if (!fs.existsSync(dataDir)) {
 }
 
 const adapter = new JSONFile(file);
-const defaultData = { orders: [] };
+const defaultData = { orders: [], users: [] };
 export const db = new Low(adapter, defaultData);
 
 export async function initDb() {
   await db.read();
   db.data ||= defaultData;
+  db.data.orders ||= [];
+  db.data.users ||= [];
   await db.write();
 }
 
