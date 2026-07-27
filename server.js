@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import path from "path";
+import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { nanoid } from "nanoid";
 import nodemailer from "nodemailer";
@@ -107,10 +108,149 @@ function orderItemsHtml(items) {
   return items.map(i => `<li>${i.qty} × ${i.name}${i.note ? ` (${i.note})` : ""}</li>`).join("");
 }
 
+// ---------------------------------------------------------------------------
+// CUSTOMER ACCOUNTS — signup with email verification code, then sign in.
+// Orders now require a valid account (see requireCustomerAuth below), so
+// customers must create + verify an account before they can checkout.
+// ---------------------------------------------------------------------------
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = crypto.scryptSync(password, salt, 64).toString("hex");
+  return `${salt}:${hash}`;
+}
+function verifyPassword(password, stored) {
+  if (!stored || !stored.includes(":")) return false;
+  const [salt, hash] = stored.split(":");
+  const check = crypto.scryptSync(password, salt, 64).toString("hex");
+  return crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(check));
+}
+function generateOtp() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+function normEmail(e) {
+  return String(e || "").trim().toLowerCase();
+}
+
+// ---- sign up: creates an unverified account and emails a 6-digit code ----
+app.post("/api/auth/signup", async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+    if (!name || !email || !password) return res.status(400).json({ error: "Name, email and password are required." });
+    if (password.length < 6) return res.status(400).json({ error: "Password must be at least 6 characters." });
+    const emailNorm = normEmail(email);
+
+    let user = db.data.users.find(u => u.email === emailNorm);
+    if (user && user.verified) {
+      return res.status(409).json({ error: "An account with this email already exists. Please sign in instead." });
+    }
+
+    const otp = generateOtp();
+    const otpExpires = Date.now() + 10 * 60 * 1000;
+    const passwordHash = hashPassword(password);
+
+    if (user) {
+      user.name = name; user.passwordHash = passwordHash; user.otp = otp; user.otpExpires = otpExpires;
+    } else {
+      user = { id: nanoid(10), name, email: emailNorm, passwordHash, verified: false, otp, otpExpires, tokens: [] };
+      db.data.users.push(user);
+    }
+    await db.write();
+
+    await sendMail(emailNorm, "Verify your StyleAI Studio account",
+      `<p>Hi ${name},</p><p>Welcome to StyleAI Studio! Your verification code is:</p>
+       <h2 style="letter-spacing:6px;font-size:28px;">${otp}</h2>
+       <p>This code expires in 10 minutes.</p>`);
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Could not create account.", detail: err.message });
+  }
+});
+
+// ---- verify the 6-digit code, then sign the customer in ----
+app.post("/api/auth/verify", async (req, res) => {
+  try {
+    const emailNorm = normEmail(req.body.email);
+    const code = String(req.body.code || "").trim();
+    const user = db.data.users.find(u => u.email === emailNorm);
+    if (!user) return res.status(404).json({ error: "No signup found for this email." });
+    if (user.verified) return res.status(400).json({ error: "This account is already verified — please sign in." });
+    if (!user.otp || user.otp !== code) return res.status(400).json({ error: "Incorrect code, please try again." });
+    if (Date.now() > user.otpExpires) return res.status(400).json({ error: "Code expired — please sign up again for a new code." });
+
+    user.verified = true;
+    delete user.otp; delete user.otpExpires;
+    const token = nanoid(32);
+    user.tokens = [...(user.tokens || []), token];
+    await db.write();
+
+    res.json({ token, name: user.name, email: user.email });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Could not verify account." });
+  }
+});
+
+// ---- resend a fresh code if the old one expired ----
+app.post("/api/auth/resend", async (req, res) => {
+  try {
+    const emailNorm = normEmail(req.body.email);
+    const user = db.data.users.find(u => u.email === emailNorm);
+    if (!user || user.verified) return res.status(400).json({ error: "No pending signup for this email." });
+    user.otp = generateOtp();
+    user.otpExpires = Date.now() + 10 * 60 * 1000;
+    await db.write();
+    await sendMail(emailNorm, "Your new verification code",
+      `<p>Your new verification code is:</p><h2 style="letter-spacing:6px;font-size:28px;">${user.otp}</h2><p>This code expires in 10 minutes.</p>`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Could not resend code." });
+  }
+});
+
+// ---- sign in with an already-verified account ----
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const emailNorm = normEmail(req.body.email);
+    const password = req.body.password || "";
+    const user = db.data.users.find(u => u.email === emailNorm);
+    if (!user || !verifyPassword(password, user.passwordHash)) {
+      return res.status(401).json({ error: "Incorrect email or password." });
+    }
+    if (!user.verified) {
+      return res.status(403).json({ error: "Please verify your email first.", needsVerification: true });
+    }
+    const token = nanoid(32);
+    user.tokens = [...(user.tokens || []), token];
+    await db.write();
+    res.json({ token, name: user.name, email: user.email });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Could not sign in." });
+  }
+});
+
+// ---- middleware: require a logged-in customer (used to gate checkout) ----
+function requireCustomerAuth(req, res, next) {
+  const auth = req.headers["authorization"] || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  const user = token && db.data.users.find(u => (u.tokens || []).includes(token));
+  if (!user) return res.status(401).json({ error: "Please sign in to place an order." });
+  req.customer = user;
+  next();
+}
+
+// ---- check whether a saved token is still valid (used on page load) ----
+app.get("/api/auth/me", requireCustomerAuth, (req, res) => {
+  res.json({ name: req.customer.name, email: req.customer.email });
+});
+
 app.get("/api/health", (req, res) => res.json({ ok: true }));
 
-// ---- create order ----
-app.post("/api/orders", async (req, res) => {
+// ---- create order (requires a signed-in, verified account) ----
+app.post("/api/orders", requireCustomerAuth, async (req, res) => {
   try {
     // Note: no rate limit here — customers can place as many orders as they
     // like from the same IP, email, or phone number.
