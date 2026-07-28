@@ -318,13 +318,34 @@ app.post("/api/tryon", async (req, res) => {
 
     const client = await Client.connect("Kwai-Kolors/Kolors-Virtual-Try-On");
     const api = await client.view_api();
-    const endpoints = api?.named_endpoints || {};
-    const endpointNames = Object.keys(endpoints);
-    if (!endpointNames.length) throw new Error("The try-on service has no available endpoints right now.");
-    console.log("Kolors try-on endpoints available:", endpointNames);
+    console.log("Kolors API shape:", JSON.stringify(api));
 
-    const endpointName = endpointNames.find(n => /tryon|try_on|infer|predict|generate|run/i.test(n)) || endpointNames[0];
-    const params = endpoints[endpointName]?.parameters || [];
+    const named = api?.named_endpoints || {};
+    const unnamed = api?.unnamed_endpoints || {};
+    const namedKeys = Object.keys(named);
+    const unnamedKeys = Object.keys(unnamed);
+
+    let endpointKey = null, params = [];
+    if (namedKeys.length) {
+      endpointKey = namedKeys.find(n => /tryon|try_on|infer|predict|generate|run/i.test(n)) || namedKeys[0];
+      params = named[endpointKey]?.parameters || [];
+    } else if (unnamedKeys.length) {
+      // pick whichever unnamed endpoint takes the most image-like inputs — that's almost certainly the try-on function
+      let best = null;
+      for (const k of unnamedKeys) {
+        const ps = unnamed[k]?.parameters || [];
+        const imgCount = ps.filter(p => {
+          const t = String(p.python_type?.type || p.type || "").toLowerCase();
+          const label = String(p.label || p.parameter_name || "").toLowerCase();
+          return t.includes("filedata") || t.includes("dict") || label.includes("img") || label.includes("image");
+        }).length;
+        if (imgCount >= 2 && (!best || ps.length > best.params.length)) best = { key: Number(k), params: ps };
+      }
+      if (best) { endpointKey = best.key; params = best.params; }
+      else { endpointKey = Number(unnamedKeys[0]); params = unnamed[unnamedKeys[0]]?.parameters || []; }
+    }
+    if (endpointKey === null) throw new Error("The try-on service has no available endpoints right now.");
+    console.log("Using Kolors endpoint:", endpointKey);
 
     let imagesAssigned = 0;
     const payload = {};
@@ -344,7 +365,7 @@ app.post("/api/tryon", async (req, res) => {
     }
     if (imagesAssigned < 2) throw new Error("Could not match the try-on service's expected inputs.");
 
-    const result = await client.predict(endpointName, payload);
+    const result = await client.predict(endpointKey, payload);
 
     const outUrl = result?.data?.[0]?.url || result?.data?.[0];
     if (!outUrl) throw new Error("No result returned from the try-on service.");
