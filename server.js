@@ -309,17 +309,42 @@ app.post("/api/tryon", async (req, res) => {
     }
 
     // ---- Free default: Kolors Virtual Try-On on Hugging Face Spaces ----
+    // We ask the Space for its live API shape instead of hardcoding an
+    // endpoint name — community demos like this change their interface
+    // from time to time, so this keeps us working across those changes.
     const { Client } = await import("@gradio/client");
     const personBlob = dataUrlToBlob(modelImage);
     const garmentBlob = await urlToBlob(garmentImage);
 
     const client = await Client.connect("Kwai-Kolors/Kolors-Virtual-Try-On");
-    const result = await client.predict("/tryon", {
-      person_img: personBlob,
-      garm_img: garmentBlob,
-      seed: 0,
-      randomize_seed: true,
-    });
+    const api = await client.view_api();
+    const endpoints = api?.named_endpoints || {};
+    const endpointNames = Object.keys(endpoints);
+    if (!endpointNames.length) throw new Error("The try-on service has no available endpoints right now.");
+    console.log("Kolors try-on endpoints available:", endpointNames);
+
+    const endpointName = endpointNames.find(n => /tryon|try_on|infer|predict|generate|run/i.test(n)) || endpointNames[0];
+    const params = endpoints[endpointName]?.parameters || [];
+
+    let imagesAssigned = 0;
+    const payload = {};
+    for (const p of params) {
+      const t = String(p.python_type?.type || p.type || "").toLowerCase();
+      const label = String(p.label || p.parameter_name || "").toLowerCase();
+      if (t.includes("filedata") || t.includes("dict") || label.includes("img") || label.includes("image")) {
+        payload[p.parameter_name] = imagesAssigned === 0 ? personBlob : garmentBlob;
+        imagesAssigned++;
+      } else if (t.includes("bool")) {
+        payload[p.parameter_name] = label.includes("random") ? true : Boolean(p.parameter_default);
+      } else if (t.includes("float") || t.includes("int") || t.includes("number")) {
+        payload[p.parameter_name] = p.parameter_default ?? 0;
+      } else if (p.parameter_default !== undefined) {
+        payload[p.parameter_name] = p.parameter_default;
+      }
+    }
+    if (imagesAssigned < 2) throw new Error("Could not match the try-on service's expected inputs.");
+
+    const result = await client.predict(endpointName, payload);
 
     const outUrl = result?.data?.[0]?.url || result?.data?.[0];
     if (!outUrl) throw new Error("No result returned from the try-on service.");
