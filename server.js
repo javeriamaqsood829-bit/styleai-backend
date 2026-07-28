@@ -30,7 +30,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "").split(",").map(s => s.trim()).filter(Boolean);
 app.use(cors({ origin: allowedOrigins.length ? allowedOrigins : true }));
-app.use(express.json());
+app.use(express.json({ limit: "15mb" }));
 app.use("/admin", express.static(path.join(__dirname, "public")));
 
 // ---- simple in-memory rate limit for order creation (swap for Redis in production) ----
@@ -245,6 +245,89 @@ function requireCustomerAuth(req, res, next) {
 // ---- check whether a saved token is still valid (used on page load) ----
 app.get("/api/auth/me", requireCustomerAuth, (req, res) => {
   res.json({ name: req.customer.name, email: req.customer.email });
+});
+
+// ---------------------------------------------------------------------------
+// VIRTUAL TRY-ON — real photo-realistic garment-on-body compositing.
+//
+// By default this uses "Kolors Virtual Try-On", a free community demo
+// hosted on Hugging Face Spaces (Kwai-Kolors/Kolors-Virtual-Try-On) — no
+// account, no card, no cost. It's a shared community server though, so it
+// can be slow, queued, or occasionally unavailable; the frontend already
+// falls back to a side-by-side comparison if a request fails.
+//
+// If you ever want a faster/more reliable paid option, sign up at fashn.ai,
+// create an API key, and add FASHN_API_KEY to .env — this route will
+// automatically switch to using FASHN instead.
+// ---------------------------------------------------------------------------
+function dataUrlToBlob(dataUrl) {
+  const match = dataUrl.match(/^data:(.+);base64,(.*)$/);
+  if (!match) throw new Error("Invalid photo data.");
+  return new Blob([Buffer.from(match[2], "base64")], { type: match[1] });
+}
+async function urlToBlob(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error("Could not download garment image.");
+  return await resp.blob();
+}
+
+app.post("/api/tryon", async (req, res) => {
+  try {
+    const { modelImage, garmentImage } = req.body;
+    if (!modelImage || !garmentImage) {
+      return res.status(400).json({ error: "Both a photo and a garment image are required." });
+    }
+
+    // ---- Paid option (only used if FASHN_API_KEY is configured) ----
+    if (process.env.FASHN_API_KEY) {
+      const startResp = await fetch("https://api.fashn.ai/v1/run", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${process.env.FASHN_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model_name: "tryon-v1.6",
+          inputs: { model_image: modelImage, garment_image: garmentImage, category: "auto", mode: "balanced" },
+        }),
+      });
+      const startData = await startResp.json();
+      if (!startResp.ok || !startData.id) {
+        return res.status(502).json({ error: startData?.error?.message || "Could not start try-on generation." });
+      }
+      let result = null;
+      for (let i = 0; i < 20; i++) {
+        await new Promise(r => setTimeout(r, 1500));
+        const statusResp = await fetch(`https://api.fashn.ai/v1/status/${startData.id}`, {
+          headers: { "Authorization": `Bearer ${process.env.FASHN_API_KEY}` },
+        });
+        const statusData = await statusResp.json();
+        if (statusData.status === "completed") { result = statusData; break; }
+        if (statusData.status === "failed") {
+          return res.status(502).json({ error: statusData?.error?.message || "Try-on generation failed." });
+        }
+      }
+      if (!result) return res.status(504).json({ error: "Try-on took too long — please try again." });
+      return res.json({ imageUrl: result.output[0] });
+    }
+
+    // ---- Free default: Kolors Virtual Try-On on Hugging Face Spaces ----
+    const { Client } = await import("@gradio/client");
+    const personBlob = dataUrlToBlob(modelImage);
+    const garmentBlob = await urlToBlob(garmentImage);
+
+    const client = await Client.connect("Kwai-Kolors/Kolors-Virtual-Try-On");
+    const result = await client.predict("/tryon", {
+      person_img: personBlob,
+      garm_img: garmentBlob,
+      seed: 0,
+      randomize_seed: true,
+    });
+
+    const outUrl = result?.data?.[0]?.url || result?.data?.[0];
+    if (!outUrl) throw new Error("No result returned from the try-on service.");
+    res.json({ imageUrl: outUrl });
+  } catch (err) {
+    console.error("Try-on error:", err);
+    res.status(500).json({ error: "Could not generate try-on." });
+  }
 });
 
 app.get("/api/health", (req, res) => res.json({ ok: true }));
